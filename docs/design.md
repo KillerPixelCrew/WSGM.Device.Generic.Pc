@@ -90,11 +90,8 @@ where it reports them (`MVL` maximum), otherwise the conservative 0–80.
 
 ## 5. Open questions
 
-1. **Coupling to WSGM's Desktop/Game transition.** The natural use is "entering Game Mode applies
-   the *TV* scene and switches the receiver to the PC input". The SDK has no lifecycle event for
-   that transition today; the plugin can only offer the controls. A small SDK addition (an
-   `ApplyModeAsync(Desktop|Game)` call, or a mode value in the descriptor state) would make the
-   coupling a plugin-side rule instead of two QAM presses.
+1. **Coupling to WSGM's Desktop/Game transition** — resolved by section 8: `ApplySessionModeAsync`
+   and `PrepareSessionModeAsync` in the SDK, plus the Desktop-First mode in WSGM core.
 2. **Scene shape.** Whole `DISPLAYCONFIG_PATH_INFO` + `MODE_INFO` snapshots are exact but brittle
    across driver updates; a reduced form (target IDs, primary, per-target mode) is more robust and
    is the intended first implementation.
@@ -107,3 +104,96 @@ Audio endpoint switching, volume and mute of the PC (WSGM core), display resolut
 and DPI (WSGM display profiles), brightness (core), the HDMI extractor / VRR fix (no interface),
 controller emulation (Steam handles desktop pads), fans, TDP, lighting (no generic path on a
 desktop).
+
+## 7. The EDID problem, and why "wait" is a state
+
+The HDMI audio extractor is also a switch, and **its inactive input sends no EDID**. While the
+switch is on another source the TV is not "off" from Windows' point of view — the display target
+does not exist at all. Any tool that applies a display profile (DisplayMagician included) fails
+until the user first picks up the extractor's remote and switches the input, and only then can
+the software act.
+
+HDMI-CEC would be the usual fix and is a **no-go**: PC graphics cards do not expose CEC on their
+HDMI outputs. The one exception is the Steam Machine, whose HDMI is wired for it; on anything else
+the extractor and the TV can only be told what to do by infrared (section 9) or by hand.
+
+So the plugin never treats an absent designated display as an error. It is a **waiting state**
+with a reason the user can act on:
+
+| State | Meaning | What the plugin publishes |
+| --- | --- | --- |
+| `present` | the designated target enumerates with a mode | `output.scene` available |
+| `waiting` | the target is absent; nothing to apply yet | `output.scene` unavailable, `PrerequisiteMissing("TV")` with `Retryable = true`; `output.designated-display` reads *Waiting for TV — switch the HDMI input* |
+| `arrived` | a display-change notification brought the target back | scene applied; in on-demand mode the takeover continues |
+
+Arrival is observed, not polled: `WM_DISPLAYCHANGE` / `WM_DEVICECHANGE` on the plugin's message
+window, confirmed by `QueryDisplayConfig`. Because `SetDisplayConfig` right after arrival can race
+the driver's own mode set, the plugin waits for one stable enumeration (two identical reads 500 ms
+apart) before applying a scene.
+
+## 8. A new WSGM mode: Desktop First, Game Mode on Demand
+
+Today WSGM 2.0 has one posture: the auto-start service launches `WSGM.exe --boot` at logon and the
+shell takeover runs unconditionally — splash over the booting desktop, Explorer exited, Steam Big
+Picture started (`docs/boot-and-shell.md` in WSGM). That is right for a handheld and wrong for a
+desk PC that is a workstation most of the day.
+
+**Desktop First** is a WSGM core feature this plugin is the first reason for. Windows boots
+normally, Explorer stays the shell, WSGM sits in the background. When it is time to game on the TV:
+
+1. **Hotkey** (keyboard chord, or a controller chord once a pad is connected) → WSGM shows its
+   splash, now over a running desktop rather than a booting one.
+2. **Prerequisite gate.** The splash shows the plugin's waiting text (*Waiting for TV — switch the
+   HDMI input*) until the device plugin reports the designated display present. Nothing has been
+   torn down yet: *Cancel* on the splash returns to the desktop with no side effects. Later, with
+   the IR blaster, this step begins by *sending* the switch command instead of asking for it.
+3. **Scene.** The plugin applies the `tv` scene and the receiver input; WSGM's Game-mode display
+   profile then applies resolution, refresh and HDR on the now-present target.
+4. **Takeover.** The existing `--boot` sequence from "posture" onward: exit Explorer, tray host,
+   startup apps, Steam Big Picture.
+5. **Back.** The existing *Switch to desktop* transition, extended with the reverse scene: `desk`
+   scene and the receiver back to the desk input. The TV going away while in Game mode (extractor
+   switched back by hand) is not an emergency: WSGM's profiles already survive display loss, and
+   the scene state simply returns to `waiting`.
+
+What this needs in **WSGM core** (not this plugin):
+
+- A boot-manifest / config value `SessionStart: BootToGameMode | DesktopFirst`. In `DesktopFirst`
+  the service still launches WSGM at logon (so elevation through the linked token keeps working),
+  but `--boot` runs an **agent** posture: tray icon, hotkey registration, device plugin cycle
+  started, no takeover.
+- The splash gains a *prerequisite* line and a cancel that is safe before Explorer exit. The
+  existing *Switch to desktop* recovery already has the "skip every game-mode side effect" branch;
+  this reuses it.
+- A global hotkey registration (`RegisterHotKey`) in agent posture; the chord itself is a setting.
+
+What this needs in the **Device SDK**, alongside the controller-ownership extension from the
+Handheld Companion design:
+
+| Addition | Why |
+| --- | --- |
+| `CapabilityRole.SessionPrerequisite` — a read-only boolean capability with a bounded waiting label | Lets the host gate Game-mode entry on a plugin fact without knowing capability ids; the splash renders the label. A plugin may declare several (display present, receiver reachable). |
+| `IDevicePlugin.ApplySessionModeAsync(SessionMode mode, deadline)` with `SessionMode { Desktop, Game }` | Called by the host before takeover and after return, so scene and receiver input follow the mode as one plugin-side rule instead of two QAM presses. Default implementation does nothing. |
+| `IDevicePlugin.PrepareSessionModeAsync(SessionMode, deadline)` | Runs *before* the prerequisite gate: this is where the IR blaster sends "switch to PC" so the wait resolves itself. Default no-op. |
+
+## 9. Planned: network IR blaster (ESP32-S3)
+
+Because CEC is unavailable, the devices around the cable — the extractor's input select, the TV's
+power and input, the receiver where eISCP is not enough — will be driven by a **custom ESP32-S3
+network IR blaster that learns codes**. It is a separate project (a prototype is being built as
+of 2026-09-03); the plugin only speaks to it.
+
+- Section `remote` (key *Custom* "Remote", icon *Wrench*): every learned code is one
+  `GenericAction` (`remote.tv-power`, `remote.extractor-input-pc`, …) plus a
+  `remote.reachable` read-only row. Codes are learned on the blaster's own UI and listed by the
+  plugin from the blaster's inventory endpoint; the plugin never stores IR data.
+- **Sequences** bind to session modes: entering Game mode runs `extractor-input-pc`, `tv-power-on`;
+  returning runs the desk equivalents. These are the bodies of `PrepareSessionModeAsync`.
+- Transport is undecided until the firmware exists: plain HTTP/JSON on the LAN with a fixed host
+  setting is the least surprising; mDNS discovery is a nicety. No cloud, no broker.
+- A blaster that does not answer degrades the `remote` section only; the manual path of section 7
+  keeps working.
+
+Steam Machine note: on Valve's hardware HDMI-CEC would make the IR path unnecessary for the TV and
+possibly the extractor. This design keeps CEC out entirely rather than half-supporting it; a
+future Steam-Machine-specific plugin would own it.
