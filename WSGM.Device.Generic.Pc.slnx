@@ -1,0 +1,11 @@
+<Solution>
+  <Folder Name="/external/">
+    <Project Path="external/WSGM.Device.Sdk/src/WSGM.Device.Sdk/WSGM.Device.Sdk.csproj" />
+  </Folder>
+  <Folder Name="/src/">
+    <Project Path="src/WSGM.Device.Generic.Pc/WSGM.Device.Generic.Pc.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/WSGM.Device.Generic.Pc.Tests/WSGM.Device.Generic.Pc.Tests.csproj" />
+  </Folder>
+</Solution>

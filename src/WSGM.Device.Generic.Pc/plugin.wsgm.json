@@ -1,0 +1,8 @@
+{
+  "id": "wsgm.device.generic.pc",
+  "name": "Generic PC",
+  "version": "0.1.0",
+  "apiVersion": 2,
+  "entryAssembly": "WSGM.Device.Generic.Pc.dll",
+  "entryType": "WSGM.Device.Generic.Pc.GenericPcPlugin"
+}
