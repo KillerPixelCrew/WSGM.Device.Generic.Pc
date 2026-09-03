@@ -197,3 +197,40 @@ of 2026-09-03); the plugin only speaks to it.
 Steam Machine note: on Valve's hardware HDMI-CEC would make the IR path unnecessary for the TV and
 possibly the extractor. This design keeps CEC out entirely rather than half-supporting it; a
 future Steam-Machine-specific plugin would own it.
+
+## 10. Planned: Home Assistant
+
+Smart TVs, network-capable AV receivers and soundbars already have Home Assistant integrations,
+and HA is where a living room's automations live anyway. The plugin therefore gets an HA backend
+next to eISCP and the IR blaster, and all three plug into the same two places: the `remote`-style
+action rows, and the session-mode sequences of section 8.
+
+- **Transport.** HA's REST API (`/api/services/<domain>/<service>`, `/api/states`) over the LAN
+  with a long-lived access token; the WebSocket API only if state pushes turn out to matter. Both
+  are a few hundred lines of `HttpClient`, no client library. Settings: `homeassistant.url`,
+  `homeassistant.token` (text, stored by WSGM like every other setting), and an entity allow-list
+  so the Device tab does not fill with the whole house.
+- **Section `home`** (key *Custom* "Home Assistant", icon *Wrench*). Entities are projected onto
+  generic roles by domain, nothing more clever than that:
+
+  | HA domain | Capability |
+  | --- | --- |
+  | `scene`, `script`, `button` | `GenericAction` |
+  | `switch`, `input_boolean`, `media_player` power | `GenericToggle` |
+  | `media_player` volume | `GenericRange` 0–100 |
+  | `media_player` source, sound mode; `select`, `input_select` | `GenericChoice` from the entity's option list |
+  | any entity's state | `GenericReadOnly` · Text |
+
+  Readback is the entity state after the service call, polled once with a short deadline, so a
+  `media_player.select_source` that HA accepted but the TV ignored is `AppliedUnverified`, not
+  `AppliedVerified`.
+- **Sequences.** A session-mode step may be an HA service call (`scene.turn_on scene.gaming_tv`),
+  so the same "entering Game mode" rule can run one HA scene instead of three IR codes. The IR
+  blaster of section 9 can itself live behind HA: an ESP32-S3 running ESPHome with its
+  `remote_transmitter` / `remote_receiver` components integrates natively and would let the
+  learned codes be HA services too, which keeps the plugin's own IR transport optional.
+- **Degrading.** An unreachable HA, a bad token, or a removed entity degrades only the affected
+  rows; the local paths (display scenes, eISCP) never depend on it.
+- **Not a controller for HA.** The plugin calls services and reads states. It does not host
+  automations, does not expose WSGM to HA (a later "WSGM as an HA device" is a different feature),
+  and never stores anything but the URL, the token and the allow-list.
