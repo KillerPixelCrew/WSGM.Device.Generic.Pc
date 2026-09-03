@@ -255,8 +255,7 @@ designing a transport.
 | `DriverUpdateService`, `HashVerificationService`, `GpuIdentifierService`, `GpuMapping.json` | **left behind** | a plugin never installs or repairs anything (SDK rule 8). Driver updates stay NoVidiaApp's job |
 | `DlssIndicatorService`, UI, `AppSettingsService`, TaskScheduler/Vanara/System.Management deps | **left behind** | no UI in a plugin; nothing else needs those packages |
 
-Licensing: NoVidiaApp's README says MIT but the repository has **no `LICENSE` file** — add one there
-before copying, so the provenance is clean. The setting IDs and value tables come from
+Same author, same licence: the code moves as-is. The setting IDs and value tables come from
 nvidiaProfileInspector and keep their attribution in `THIRD_PARTY_NOTICES.md`.
 
 ### 11.2 Capability surface
