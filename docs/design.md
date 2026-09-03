@@ -234,3 +234,84 @@ action rows, and the session-mode sequences of section 8.
 - **Not a controller for HA.** The plugin calls services and reads states. It does not host
   automations, does not expose WSGM to HA (a later "WSGM as an HA device" is a different feature),
   and never stores anything but the URL, the token and the allow-list.
+
+## 11. NVIDIA module — lifted from NoVidiaApp
+
+[NoVidiaApp](https://github.com/NightHammer1000/NoVidiaApp) (same author) writes NVIDIA driver
+settings straight into the driver's profile database through NvAPI DRS — the surface NVIDIA
+Control Panel and Profile Inspector use. Nothing in it needs an IPC or a running app: the driver
+*is* the store. That makes it the one module here that adopts existing code 1:1 instead of
+designing a transport.
+
+### 11.1 What is lifted, what is left
+
+| From NoVidiaApp | Into the plugin | Note |
+| --- | --- | --- |
+| `NoVidiaApp.Native` — `NvapiDrsWrapper`, `NvApiExecutor` (serialized NvAPI calls), `NativeArrayHelper`, `NvidiaDriverInfo` | verbatim, namespace-renamed | `net10.0`, zero package dependencies; P/Invokes the driver's own `nvapi64.dll`, so nothing ships in the package |
+| `Data/CuratedSettingsData` (the ~40-setting JSON with categories, subcategories, value tables, defaults), `SettingDefinition`, `SettingValue`, `SettingState`, `SettingsMetaService` | verbatim | this JSON *is* the capability surface; the plugin never invents a setting |
+| `NvidiaProfileService2` + `INvidiaProfileService` (summaries, details, create/delete profile, set/reset, save, refresh, backup) | verbatim minus `Microsoft.Extensions.Logging` → `PluginTrace` | the "changes are held until `SaveChangesAsync`" model maps onto one command = set + save + re-read |
+| `ProfilePersistenceService` (`profiles.json` snapshot, replay on start) | verbatim, rooted in the plugin `StateDirectory` | this is exactly the SDK's "record durable state you own, bounded" rule; replay runs once per cycle start so a driver reinstall does not wipe tweaks |
+| Game scanners (Steam/Epic/GOG), `GameScannerService` | **left behind** | WSGM already knows the running game (section 11.3); no library scan needed |
+| `DriverUpdateService`, `HashVerificationService`, `GpuIdentifierService`, `GpuMapping.json` | **left behind** | a plugin never installs or repairs anything (SDK rule 8). Driver updates stay NoVidiaApp's job |
+| `DlssIndicatorService`, UI, `AppSettingsService`, TaskScheduler/Vanara/System.Management deps | **left behind** | no UI in a plugin; nothing else needs those packages |
+
+Licensing: NoVidiaApp's README says MIT but the repository has **no `LICENSE` file** — add one there
+before copying, so the provenance is clean. The setting IDs and value tables come from
+nvidiaProfileInspector and keep their attribution in `THIRD_PARTY_NOTICES.md`.
+
+### 11.2 Capability surface
+
+Section `nvidia` (key *Custom* "NVIDIA", icon *Gauge*), published only when `NvidiaDriverInfo`
+finds a driver — on an AMD or Intel box the section does not exist, rather than showing 40
+unavailable rows. Categories are the JSON's: Performance, Quality, Display, DLSS, VR.
+
+- Every curated setting is one `GenericChoice` whose options are the setting's value table
+  (choice ids `v<value>`, labels the JSON names). `Persistence = DevicePersistent`: a DRS write
+  survives reboot and applies at the next process start, not to a running game.
+- `Persistence` is the only thing the SDK lets the row say about *when* it applies, so the row
+  labels carry no "(next launch)" — the docs and the trace line do.
+- Settings marked `isAdvanced` sit behind one plugin setting `nvidia.show-advanced` (bool, default
+  off), which changes the declared set and therefore bumps the descriptor generation.
+- Readback is the real thing: after `SetSettingAsync` + `SaveChangesAsync` the plugin re-reads
+  the profile and reports `AppliedVerified` with the driver's value, so a write NVIDIA App clobbered
+  a second later shows up as the driver's truth on the next observation. Same coexistence notice
+  as NoVidiaApp: last writer wins, uninstall NVIDIA App to make this authoritative.
+
+### 11.3 Per-game scope — the part that needs the SDK
+
+NoVidiaApp's per-game mechanism is a DRS profile bound to the game's executable, created on demand
+and edited like the global one. The plugin can do exactly that, with one thing it does not have
+today: **which game is running.** WSGM knows — its running-application monitor resolves the Steam
+app id and the executable path for the RTSS profile and the controller target — but the SDK never
+passes it to the plugin.
+
+Proposed SDK addition (alongside sections 8 and the HC design's controller ownership):
+
+```csharp
+public sealed record RunningApplication(string? ApplicationId, uint? SteamAppId, string? ExecutablePath);
+
+public interface IDevicePlugin
+{
+    /// <summary>The foreground application WSGM resolved, or null when none is running.</summary>
+    ValueTask ApplyRunningApplicationAsync(RunningApplication? application, CancellationToken ct)
+        => ValueTask.CompletedTask;
+}
+```
+
+With it, every `nvidia.*` capability gains a second instance, `InstanceId = "game"`, published only
+while an application with an executable path is running. Writes to the `game` instance go to that
+executable's DRS profile (created through `CreateProfileAsync` on first write, named after the
+game); reads show the profile's value or *inherited* when the profile does not override it.
+Global rows keep writing the Base profile.
+
+Why not lean on WSGM's own per-application desired-state layers, which re-issue capability values
+when the game changes? Because that replays *global* writes: last-writer-wins into the Base
+profile, settings leaking into the next game if a switch is missed, and nothing at all when WSGM is
+not running. NVIDIA's per-executable profile is the right home, applies without WSGM present, and
+is what NoVidiaApp already proved.
+
+### 11.4 Not in this module
+
+Overclocking, fan curves and power limits on the GPU (NvAPI exposes them, NoVidiaApp deliberately
+does not touch them), the driver updater, and G-Sync/VRR panel toggles that belong to WSGM's
+display profiles.
